@@ -137,16 +137,16 @@ if __name__ == '__main__':
                 val_loss = loss_fn(out.view(-1, data_source.get_decoder_vocab_size()), target=target_batch.view(-1))
                 val_loss_list.append(val_loss.item())
 
-            mean_val_loss = np.mean(val_loss_list)
-            with open(val_loss_list_path,"a") as f:
-                f.write(f"{str(epoch_index).zfill(4)}: {mean_val_loss}\n")
-            if mean_val_loss < best_val_loss:
-                print(f"[NEW BEST MODEL!] Validation Loss @ epoch {str(epoch_index).zfill(4)}: {mean_val_loss}")
-                best_val_loss = mean_val_loss
-                # Save model checkpoint
-                torch.save(transformer, checkpoint_path)
-            else:
-                print(f"Validation Loss @ epoch {str(epoch_index).zfill(4)}: {mean_val_loss}")
-            val_loss_list = []
+        mean_val_loss = np.mean(val_loss_list)
+        with open(val_loss_list_path,"a") as f:
+            f.write(f"{str(epoch_index).zfill(4)}: {mean_val_loss}\n")
+        if mean_val_loss < best_val_loss:
+            print(f"[NEW BEST MODEL!] Validation Loss @ epoch {str(epoch_index).zfill(4)}: {mean_val_loss}")
+            best_val_loss = mean_val_loss
+            # Save model checkpoint
+            torch.save(transformer, checkpoint_path)
+        else:
+            print(f"Validation Loss @ epoch {str(epoch_index).zfill(4)}: {mean_val_loss}")
+        val_loss_list = []
 
 
