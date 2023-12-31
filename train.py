@@ -44,7 +44,6 @@ def get_config() -> Dict:
     return config
 
 
-# TODO: PUT EVERYTHING ON THE RIGHT DEVICEEE!!!!
 if __name__ == '__main__':
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
