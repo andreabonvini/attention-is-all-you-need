@@ -1,0 +1,9 @@
+{
+    "transformer_params": {
+        "embedding_dimension": 512,
+        "n_layers": 6,
+        "number_of_attention_heads": 8,
+        "feedforward_dimension": 2048,
+        "dropout_probability": 0.1
+    }
+}
