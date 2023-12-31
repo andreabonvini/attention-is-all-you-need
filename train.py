@@ -82,6 +82,9 @@ if __name__ == '__main__':
     best_val_loss = + np.inf
 
     for epoch_index in range(n_epochs):
+
+        # ==== Start Training Loop ====
+        transformer.train()
         for batch_dict in tqdm(train_iter):
             # Unpack dictionary
             encoder_input_batch = batch_dict["encoder_input"].to(device)
@@ -111,6 +114,9 @@ if __name__ == '__main__':
             f.write(f"{str(epoch_index).zfill(4)}: {mean_train_loss}\n")
         train_loss_list = []
 
+        # ==== Start Validation Loop ====
+
+        transformer.eval()
         for batch_dict in tqdm(val_iter):
             # Unpack dictionary
             encoder_input_batch = batch_dict["encoder_input"]
