@@ -2,7 +2,7 @@ import os
 
 import numpy as np
 
-from lib import Transformer, PyTorchTransformer
+from lib import Transformer
 from tqdm import tqdm
 from lib.datasets import German2EnglishDataFactory
 import argparse
