@@ -42,7 +42,7 @@ if __name__ == "__main__":
     val_urls = ('val.de.gz', 'val.en.gz')
     test_urls = ('test_2016_flickr.de.gz', 'test_2016_flickr.en.gz')
 
-    for train_url, val_url, test_url in train_urls, val_urls, test_urls:
+    for train_url, val_url, test_url in zip(train_urls, val_urls, test_urls):
         download_from_url(url_base + train_url)
         download_from_url(url_base + val_url)
         download_from_url(url_base + test_url)

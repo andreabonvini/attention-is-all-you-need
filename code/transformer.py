@@ -15,8 +15,8 @@ class EmbeddingBlock(nn.Module):
         )
 
     def forward(self, x):
+        # From Section 3.4 of the paper: "In the embedding layers, we multiply those weights by sqrt(d_model)"
         return self.embedding_lookup_table(x) * math.sqrt(self.embedding_dim)
-        # FIXME: remove * math.sqrt(self.embedding_dim)  # noqa
 
 
 class PositionalEncoding(nn.Module):
@@ -24,14 +24,14 @@ class PositionalEncoding(nn.Module):
         super(PositionalEncoding, self).__init__()
         token_positions = torch.arange(0, max_tokens).unsqueeze(1)
         even_embedding_positions = torch.arange(0, embedding_dim, 2)
-        self.positional_encoding = torch.zeros(max_tokens, embedding_dim)
+        # We use encapsulate self.positional_encoding to nn.Parameter() so when moving a Transformer
+        # instance to a device (GPU or CPU) self.positional_encoding will be moved too.
+        self.positional_encoding = nn.Parameter(torch.zeros(max_tokens, embedding_dim))
+        self.positional_encoding.requires_grad = False
         self.positional_encoding[:, 0::2] = torch.sin(
             token_positions / np.power(scalar, even_embedding_positions / embedding_dim))
         self.positional_encoding[:, 1::2] = torch.cos(
             token_positions / np.power(scalar, even_embedding_positions / embedding_dim))
-        self.positional_encoding.requires_grad = False
-        # From Section 3.4 of the paper: "In the embedding layers, we multiply those weights by sqrt(d_model)"
-        self.positional_encoding = self.positional_encoding * math.sqrt(embedding_dim)
 
     def forward(self, x):  # x.shape: (n_batch, n_tokens, embedding_dimension)
         assert (len(x.size()) == 3)
@@ -54,14 +54,14 @@ def batched_scaled_dot_product_attention(Q, K, V, mask: Optional[torch.Tensor] =
     assert num_batches_q == num_batches_k
     assert dim_q == dim_k
     assert K.shape == V.shape
-    if mask is None:
-        mask = torch.ones(num_batches_q, num_tokens_q, num_tokens_k).detach()  # todo: is detach() needed?
-    assert mask.shape == (num_batches_q, num_tokens_q, num_tokens_k)
     raw_attention_values = torch.bmm(Q, K.permute(0, 2, 1)) / np.sqrt(dim_k)
     # Note that we normalize by np.sqrt(dim_k)  instead of np.sqrt(dim_q), this is due to the fact that we are
     # going to apply the softmax on each row of raw_attention_values (dq x dk),
     # and each row will be composed of dim_k elements.
-    raw_attention_values = raw_attention_values.masked_fill(mask == 0, -1e9)
+    if mask is not None:
+        assert mask.shape == (num_batches_q, num_tokens_q, num_tokens_k)
+        # Fill values where mask == False with -np.inf
+        raw_attention_values = raw_attention_values.masked_fill(~mask, -np.inf)
     soft_attention_values = nn.Softmax(dim=1)(raw_attention_values)
     return torch.bmm(soft_attention_values, V)
 

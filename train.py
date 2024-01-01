@@ -2,9 +2,9 @@ import os
 
 import numpy as np
 
-from lib import Transformer
+from code import Transformer
 from tqdm import tqdm
-from lib.datasets import German2EnglishDataFactory
+from code.datasets import German2EnglishDataFactory
 import argparse
 import json
 from typing import Dict
