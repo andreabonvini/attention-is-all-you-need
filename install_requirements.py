@@ -15,7 +15,7 @@ def get_requirements_list() -> List[str]:
     if args.device.lower() == "cpu":
         requirements_list.append("torch==2.1.0")
     elif args.device.lower() == "gpu":
-        requirements_list.append("torch==2.1.0+cu121")
+        requirements_list.append("torch==2.1.0+cu121")  # TODO: NOT SURE IF THIS WORKS, TEST ON COLAB.
     return requirements_list
 
 

@@ -24,7 +24,7 @@ class PositionalEncoding(nn.Module):
         super(PositionalEncoding, self).__init__()
         token_positions = torch.arange(0, max_tokens).unsqueeze(1)
         even_embedding_positions = torch.arange(0, embedding_dim, 2)
-        # We use encapsulate self.positional_encoding to nn.Parameter() so when moving a Transformer
+        # We encapsulate self.positional_encoding to nn.Parameter() so when moving a Transformer
         # instance to a device (GPU or CPU) self.positional_encoding will be moved too.
         self.positional_encoding = nn.Parameter(torch.zeros(max_tokens, embedding_dim))
         self.positional_encoding.requires_grad = False
@@ -62,15 +62,15 @@ def batched_scaled_dot_product_attention(Q, K, V, mask: Optional[torch.Tensor] =
         assert mask.shape == (num_batches_q, num_tokens_q, num_tokens_k)
         # Fill values where mask == False with -np.inf
         raw_attention_values = raw_attention_values.masked_fill(~mask, -np.inf)
-    soft_attention_values = nn.Softmax(dim=1)(raw_attention_values)
+    soft_attention_values = nn.Softmax(dim=2)(raw_attention_values)
     return torch.bmm(soft_attention_values, V)
 
 
 class MultiHeadAttention(nn.Module):
     def __init__(
-            self,
-            number_of_attention_heads: int,
-            embedding_dimension: int
+        self,
+        number_of_attention_heads: int,
+        embedding_dimension: int
     ):
         super(MultiHeadAttention, self).__init__()
         assert embedding_dimension % number_of_attention_heads == 0
@@ -213,7 +213,9 @@ class Transformer(nn.Module):
         self.embedding_dimension = embedding_dimension
         self.n_layers = n_layers
 
-        self.encoder_blocks = [
+        # We need to use nn.ModuleList otherwise the Transformer class will not properly register the individual
+        # encoder blocks as its parameters (the optimizer may not update them and .to(device) won't have any effect)
+        self.encoder_blocks = nn.ModuleList([
             TransformerEncoderBlock(
                 embedding_dimension=embedding_dimension,
                 n_attention_heads=number_of_attention_heads,
@@ -221,9 +223,11 @@ class Transformer(nn.Module):
                 dropout_probability=dropout_probability
             )
             for _ in range(n_layers)
-        ]
+        ])
 
-        self.decoder_blocks = [
+        # We need to use nn.ModuleList otherwise the Transformer class will not properly register the individual
+        # decoder blocks as its parameters (the optimizer may not update them and .to(device) won't have any effect)
+        self.decoder_blocks = nn.ModuleList([
             TransformerDecoderBlock(
                 embedding_dimension=embedding_dimension,
                 n_attention_heads=number_of_attention_heads,
@@ -231,7 +235,7 @@ class Transformer(nn.Module):
                 dropout_probability=dropout_probability
             )
             for _ in range(n_layers)
-        ]
+        ])
         self.fully_connected_layer = nn.Linear(embedding_dimension, decoder_vocabulary_dimension)  # just one?
 
     def forward(

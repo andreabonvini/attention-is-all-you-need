@@ -69,7 +69,7 @@ if __name__ == '__main__':
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=data_source.get_decoder_pad_token())
     # Note that in PyTorch CrossEntropyLoss already computed softmax, this is why we didn't include it in our
     # Transformer definition!
-    optimizer = torch.optim.Adam(transformer.parameters(), lr=1e-2)
+    optimizer = torch.optim.Adam(transformer.parameters(), lr=1e-3)
 
     train_loss_list = []
     val_loss_list = []
@@ -118,12 +118,12 @@ if __name__ == '__main__':
         transformer.eval()
         for batch_dict in tqdm(val_iter):
             # Unpack dictionary
-            encoder_input_batch = batch_dict["encoder_input"]
-            decoder_input_batch = batch_dict["decoder_input"]
-            encoder_self_attention_mask = batch_dict["encoder_self_attention_mask"]
-            decoder_self_attention_mask = batch_dict["decoder_self_attention_mask"]
-            decoder_cross_attention_mask = batch_dict["decoder_cross_attention_mask"]
-            target_batch = batch_dict["target"]
+            encoder_input_batch = batch_dict["encoder_input"].to(device)
+            decoder_input_batch = batch_dict["decoder_input"].to(device)
+            encoder_self_attention_mask = batch_dict["encoder_self_attention_mask"].to(device)
+            decoder_self_attention_mask = batch_dict["decoder_self_attention_mask"].to(device)
+            decoder_cross_attention_mask = batch_dict["decoder_cross_attention_mask"].to(device)
+            target_batch = batch_dict["target"].to(device)
 
             with torch.no_grad():
                 out = transformer(
