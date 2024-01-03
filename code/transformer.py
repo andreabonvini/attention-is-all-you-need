@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torchtext
 import numpy as np
 import math
 from typing import Optional
@@ -20,7 +21,7 @@ class EmbeddingBlock(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, embedding_dim: int, max_tokens: int, scalar: int = 1e4):
+    def __init__(self, embedding_dim: int, max_tokens: int, scalar: int = 1e4, dropout_probability: float = 0.0):
         super(PositionalEncoding, self).__init__()
         token_positions = torch.arange(0, max_tokens).unsqueeze(1)
         even_embedding_positions = torch.arange(0, embedding_dim, 2)
@@ -32,38 +33,45 @@ class PositionalEncoding(nn.Module):
             token_positions / np.power(scalar, even_embedding_positions / embedding_dim))
         self.positional_encoding[:, 1::2] = torch.cos(
             token_positions / np.power(scalar, even_embedding_positions / embedding_dim))
+        self.dropout = nn.Dropout(p=dropout_probability)
 
     def forward(self, x):  # x.shape: (n_batch, n_tokens, embedding_dimension)
         assert (len(x.size()) == 3)
         n_tokens = x.size(1)
-        return x + self.positional_encoding[: n_tokens, :]
+        # From section 5.4: "In addition, we apply dropout to the sums of the embeddings and the positional
+        # encodings in both the encoder and decoder stacks."
+        return x + self.dropout(self.positional_encoding[: n_tokens, :])
 
 
-def batched_scaled_dot_product_attention(Q, K, V, mask: Optional[torch.Tensor] = None):
-    # Q, K, V size: (num_batches, num_tokens, dim)
-    # Note that Q can have a different number of rows (i.e. tokens) with respect to K and V when computing
-    # cross-attention!
-    # e.g. In a english-to-italian translation model we may have
-    # encoder_input: <start> I like you <end>  (5 tokens)
-    # decoder_input: <start> Mi piaci <end>    (4 tokens)
-    assert (len(Q.shape) == 3)
-    assert (len(K.shape) == 3)
-    assert (len(V.shape) == 3)
-    num_batches_q, num_tokens_q, dim_q = Q.shape
-    num_batches_k, num_tokens_k, dim_k = K.shape
-    assert num_batches_q == num_batches_k
-    assert dim_q == dim_k
-    assert K.shape == V.shape
-    raw_attention_values = torch.bmm(Q, K.permute(0, 2, 1)) / np.sqrt(dim_k)
-    # Note that we normalize by np.sqrt(dim_k)  instead of np.sqrt(dim_q), this is due to the fact that we are
-    # going to apply the softmax on each row of raw_attention_values (dq x dk),
-    # and each row will be composed of dim_k elements.
-    if mask is not None:
-        assert mask.shape == (num_batches_q, num_tokens_q, num_tokens_k)
-        # Fill values where mask == False with -np.inf
-        raw_attention_values = raw_attention_values.masked_fill(~mask, -np.inf)
-    soft_attention_values = nn.Softmax(dim=2)(raw_attention_values)
-    return torch.bmm(soft_attention_values, V)
+class ScaledDotProductAttention(nn.Module):
+    def __init__(self):
+        super(ScaledDotProductAttention, self).__init__()
+
+    def forward(self, Q, K, V, mask: Optional[torch.Tensor] = None):  # noqa
+        # Q, K, V size: (num_batches, num_tokens, dim)
+        # Note that Q can have a different number of rows (i.e. tokens) with respect to K and V when computing
+        # cross-attention!
+        # e.g. In a english-to-italian translation model we may have
+        # encoder_input: <start> I like you <end>  (5 tokens)
+        # decoder_input: <start> Mi piaci <end>    (4 tokens)
+        assert (len(Q.shape) == 3)
+        assert (len(K.shape) == 3)
+        assert (len(V.shape) == 3)
+        num_batches_q, num_tokens_q, dim_q = Q.shape
+        num_batches_k, num_tokens_k, dim_k = K.shape
+        assert num_batches_q == num_batches_k
+        assert dim_q == dim_k
+        assert K.shape == V.shape
+        raw_attention_values = torch.bmm(Q, K.permute(0, 2, 1)) / np.sqrt(dim_k)
+        # Note that we normalize by np.sqrt(dim_k)  instead of np.sqrt(dim_q), this is due to the fact that we are
+        # going to apply the softmax on each row of raw_attention_values (dq x dk),
+        # and each row will be composed of dim_k elements.
+        if mask is not None:
+            assert mask.shape == (num_batches_q, num_tokens_q, num_tokens_k)
+            # Fill values where mask == False with -np.inf
+            raw_attention_values = raw_attention_values.masked_fill(~mask, -np.inf)
+        soft_attention_values = nn.Softmax(dim=2)(raw_attention_values)
+        return torch.bmm(soft_attention_values, V)
 
 
 class MultiHeadAttention(nn.Module):
@@ -81,7 +89,8 @@ class MultiHeadAttention(nn.Module):
         self.Q_projection = nn.Linear(embedding_dimension, embedding_dimension)
         self.K_projection = nn.Linear(embedding_dimension, embedding_dimension)
         self.V_projection = nn.Linear(embedding_dimension, embedding_dimension)
-        self.fnn_layer = nn.Linear(embedding_dimension, embedding_dimension)
+        self.scaled_dot_product_attention = ScaledDotProductAttention()
+        self.linear = nn.Linear(embedding_dimension, embedding_dimension)
 
     def forward(self, Q, K, V, mask: Optional[torch.Tensor] = None):
         Q_proj = self.Q_projection(Q)
@@ -92,7 +101,7 @@ class MultiHeadAttention(nn.Module):
 
         x = torch.concat(
             [
-                batched_scaled_dot_product_attention(
+                self.scaled_dot_product_attention(
                     Q=Q_proj[:, :, i * d_k: (i + 1) * d_k],
                     K=K_proj[:, :, i * d_k: (i + 1) * d_k],
                     V=V_proj[:, :, i * d_k: (i + 1) * d_k],
@@ -103,7 +112,7 @@ class MultiHeadAttention(nn.Module):
             dim=-1  # We concatenate on the features dimension.
         )  # output shape: (num_batches, num_tokens, embedding_dimension)
 
-        return self.fnn_layer(x)  # output shape: (num_batches, num_tokens, embedding_dimension)
+        return self.linear(x)  # output shape: (num_batches, num_tokens, embedding_dimension)
 
 
 class TransformerEncoderBlock(nn.Module):
@@ -113,7 +122,7 @@ class TransformerEncoderBlock(nn.Module):
             embedding_dimension: int,
             n_attention_heads: int,
             feedforward_dimension: int,
-            dropout_probability: float,
+            dropout_probability: float = 0.0,
     ):
         super(TransformerEncoderBlock, self).__init__()
 
@@ -132,6 +141,8 @@ class TransformerEncoderBlock(nn.Module):
         self.layer_norm_2 = nn.LayerNorm(normalized_shape=embedding_dimension)
 
     def forward(self, x, mask: Optional[torch.Tensor] = None):
+        # From section 5.4: "We apply dropout to the output of each sub-layer,
+        # before it is added to the sub-layer input and normalized."
         x = self.layer_norm_1(
             x + self.dropout_1(self.multi_head_self_attention(Q=x, K=x, V=x, mask=mask))
         )
@@ -147,7 +158,7 @@ class TransformerDecoderBlock(nn.Module):
             embedding_dimension: int,
             n_attention_heads: int,
             feedforward_dimension: int,
-            dropout_probability: float,
+            dropout_probability: float = 0.0,
     ):
         super(TransformerDecoderBlock, self).__init__()
 
@@ -180,7 +191,8 @@ class TransformerDecoderBlock(nn.Module):
             self_attention_mask: Optional[torch.Tensor] = None,
             cross_attention_mask: Optional[torch.Tensor] = None
     ):
-
+        # From section 5.4: "We apply dropout to the output of each sub-layer,
+        # before it is added to the sub-layer input and normalized."
         x = self.layer_norm_1(
             x + self.dropout_1(self.masked_multi_head_self_attention(Q=x, K=x, V=x, mask=self_attention_mask))
         )
@@ -203,12 +215,14 @@ class Transformer(nn.Module):
             n_layers: int,
             number_of_attention_heads: int,
             feedforward_dimension: int,
-            dropout_probability: float = 0.1
+            dropout_probability: float = 0.0
     ):
         super(Transformer, self).__init__()
 
         self.encoder_embedding_block = EmbeddingBlock(encoder_vocabulary_dimension, embedding_dimension)
-        self.positional_encoding_block = PositionalEncoding(embedding_dimension, max_tokens)
+        self.positional_encoding_block = PositionalEncoding(
+            embedding_dimension, max_tokens, dropout_probability=dropout_probability
+        )
         self.decoder_embedding_block = EmbeddingBlock(decoder_vocabulary_dimension, embedding_dimension)
         self.embedding_dimension = embedding_dimension
         self.n_layers = n_layers
@@ -236,7 +250,7 @@ class Transformer(nn.Module):
             )
             for _ in range(n_layers)
         ])
-        self.fully_connected_layer = nn.Linear(embedding_dimension, decoder_vocabulary_dimension)  # just one?
+        self.fully_connected_layer = nn.Linear(embedding_dimension, decoder_vocabulary_dimension)
 
     def forward(
             self,
@@ -247,7 +261,7 @@ class Transformer(nn.Module):
             decoder_cross_attention_mask: Optional[torch.Tensor] = None
 
     ):
-
+        # todo: maybe it's better to just factorise this function in demo.py
         encoder_input_embeddings = self.positional_encoding_block(self.encoder_embedding_block(encoder_input_tokens))
         decoder_input_embeddings = self.positional_encoding_block(self.decoder_embedding_block(decoder_input_tokens))
         # todo: do we need to detach() the masks?
@@ -266,6 +280,49 @@ class Transformer(nn.Module):
                 cross_attention_mask=decoder_cross_attention_mask,
             )
         return self.fully_connected_layer(decoder_output) # noqa
+
+    def run_inference(
+            self,
+            encoder_sentence: str,
+            encoder_tokenizer,  # todo: add type
+            encoder_vocab: torchtext.vocab.vocab,
+            decoder_vocab: torchtext.vocab.vocab,
+            max_decoder_length: int
+    ):
+
+        encoder_tokens_str = encoder_tokenizer(encoder_sentence)
+        encoder_s2i = encoder_vocab.get_stoi()
+        decoder_i2s = decoder_vocab.get_itos()
+        encoder_tokens = torch.tensor(
+            [
+                [encoder_vocab["<bos>"]] +
+                [encoder_s2i[tok] for tok in encoder_tokens_str] +
+                [encoder_vocab["<eos>"]]
+            ]
+        )
+        current_decoder_output_length = 0
+        last_decoder_output_token = decoder_vocab['<bos>']
+        batch_length = 1
+        decoder_tokens = torch.ones(batch_length, max_decoder_length).long() * decoder_vocab['<pad>']
+
+        self.eval()
+
+        while current_decoder_output_length < max_decoder_length and last_decoder_output_token != decoder_vocab['<eos>']:
+            decoder_tokens[0, current_decoder_output_length] = last_decoder_output_token
+            n_tokens_decoder = max_decoder_length
+            n_tokens_encoder = encoder_tokens.size(1)
+            decoder_cross_attention_mask = torch.ones(n_tokens_decoder, n_tokens_encoder).bool() & (
+                        encoder_tokens != encoder_vocab['<pad>']).unsqueeze(0)  # add batch dimension
+            output = self.forward(
+                encoder_input_tokens=encoder_tokens,
+                decoder_input_tokens=decoder_tokens,
+                decoder_cross_attention_mask=decoder_cross_attention_mask
+            )
+            last_decoder_output_token = torch.argmax(output[0][current_decoder_output_length])
+            current_decoder_output_length += 1
+        return " ".join([decoder_i2s[torch.argmax(logits)] for logits in output[0]])  # noqa
+
+
 
 
 

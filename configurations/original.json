@@ -1,4 +1,12 @@
 {
+    "dataset": {
+        "batch_size": 1024
+    },
+    "training": {
+        "n_epochs": 100000,
+        "checkpoint_folder": "checkpoint_original_model",
+        "checkpoint_file": null
+    },
     "transformer_params": {
         "embedding_dimension": 512,
         "n_layers": 6,

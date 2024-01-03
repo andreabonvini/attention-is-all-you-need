@@ -49,6 +49,18 @@ class German2EnglishDataFactory:
     def get_decoder_vocab_size(self):
         return len(self.decoder_vocab)
 
+    def get_encoder_vocab(self):
+        return self.encoder_vocab
+
+    def get_decoder_vocab(self):
+        return self.decoder_vocab
+
+    def get_decoder_tokenizer(self):
+        return self.decoder_tokenizer
+
+    def get_encoder_tokenizer(self):
+        return self.encoder_tokenizer
+
     @staticmethod
     def build_vocab(filepath, tokenizer):
         counter = Counter()
