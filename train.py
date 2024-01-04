@@ -78,13 +78,17 @@ if __name__ == '__main__':
         print(f"===> Creating new Transformer model ...")
         start_epoch = 0
 
-    # compiled_transformer = torch.compile(transformer) # Buggy OMP: Error #15: Initializing libomp.dylib, but found libiomp5.dylib already initialized.  # noqa
+    transformer = torch.compile(transformer) # Buggy OMP: Error #15: Initializing libomp.dylib, but found libiomp5.dylib already initialized.  # noqa
 
     train_iter, val_iter, test_iter = data_source.get_data()
 
     # From section 5.4: "During training, we employed label smoothing of value ε=0.1 .
     # This hurts perplexity, as the model learns to be more unsure, but improves accuracy and BLEU score."
-    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=data_source.get_decoder_pad_token(), label_smoothing=0.1)
+    loss_fn = torch.nn.CrossEntropyLoss(
+        weight=data_source.get_training_weights().to(device),
+        ignore_index=data_source.get_decoder_pad_token(),
+        label_smoothing=0.1
+    )
     # Note that in PyTorch CrossEntropyLoss already computed softmax, this is why we didn't include it in our
     # Transformer definition!
 
@@ -94,6 +98,9 @@ if __name__ == '__main__':
     lr_scheduler = LambdaLR(
         optimizer=optimizer, lr_lambda=lambda step: get_current_lr(d_model=d_model, step_num=step, warmup_steps=4000)
     )
+    # IMPORTANT: Note that the way we schedule the learning rate here is fundamental to assure
+    # that the model learns properly. We increase the learning rate linearly for 4000 epochs and then we decrease it
+    # exponentially.
 
     train_loss_list = []
     val_loss_list = []
@@ -127,7 +134,6 @@ if __name__ == '__main__':
             optimizer.step()
             lr_scheduler.step()
             train_loss_list.append(loss.item())
-            break
 
         mean_train_loss = np.mean(train_loss_list)
         print(f"Train Loss @ epoch {str(epoch_index).zfill(3)}: {mean_train_loss}")
@@ -157,7 +163,6 @@ if __name__ == '__main__':
                 )
                 val_loss = loss_fn(out.view(-1, data_source.get_decoder_vocab_size()), target=target_batch.view(-1))
                 val_loss_list.append(val_loss.item())
-                break
 
         mean_val_loss = np.mean(val_loss_list)
         with open(val_loss_list_path, "a") as f:

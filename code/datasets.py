@@ -3,8 +3,10 @@ from torch.nn.functional import pad
 from torch.utils.data import DataLoader
 from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import vocab
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, defaultdict
 from torchtext.utils import extract_archive
+import numpy as np
+from tqdm import tqdm
 import io
 
 
@@ -176,3 +178,32 @@ class German2EnglishDataFactory:
         test_iter = DataLoader(self.test_data, batch_size=self.batch_size,
                                shuffle=True, collate_fn=self.generate_batch)
         return train_iter, valid_iter, test_iter
+
+    def get_training_weights(self):
+
+        print("Computing training target weights...")
+
+        train_iter = DataLoader(self.train_data, batch_size=1,
+                                shuffle=True, collate_fn=self.generate_batch)
+        label_counter = defaultdict(int)
+        # total_number_of_samples = 0
+        for batch_dict in tqdm(train_iter):
+            target_batch = batch_dict["target"]
+            assert len(target_batch.shape) == 2  # batch_dim, n_tokens
+            for sample in range(target_batch.size(0)):
+                for target_token in range(target_batch.size(1)):
+                    tok = target_batch[sample, target_token].item()
+                    if tok != self.get_decoder_pad_token():
+                        label_counter[tok] += 1
+            # total_number_of_samples += torch.sum(target_batch != data_source.get_decoder_pad_token()).item()  # noqa
+
+        key_value_tuples = label_counter.items()
+        n_classes = len(key_value_tuples)
+        # weights = [(1 / kv[1]) * total_number_of_samples / n_classes for kv in key_value_tuples]
+        sum_one_over_nc = np.sum([(1 / kv[1]) for kv in key_value_tuples])
+        weights_dict = {kv[0]: (1 / kv[1]) * n_classes / sum_one_over_nc for kv in key_value_tuples}
+        weights = torch.zeros(self.get_decoder_vocab_size())
+        for c in range(self.get_decoder_vocab_size()):
+            if c in weights_dict:
+                weights[c] = weights_dict[c]
+        return weights
