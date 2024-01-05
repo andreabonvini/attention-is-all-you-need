@@ -1,5 +1,5 @@
 {
-    "use_pytorch_transformer_class": false,
+    "use_pytorch_transformer_class": true,
     "dataset": {
         "batch_size": 512
     },
@@ -11,7 +11,7 @@
         "adam_beta_1": 0.98,
         "adam_eps": 1e-9,
         "label_smoothing_perc": 0.0,
-        "checkpoint_folder": "checkpoint_original_model_base",
+        "checkpoint_folder": "checkpoint_original_model_base_pt",
         "checkpoint_file": null
     },
     "transformer_params": {

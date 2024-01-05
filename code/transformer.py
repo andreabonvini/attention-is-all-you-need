@@ -90,7 +90,7 @@ class MultiHeadAttention(nn.Module):
         self.K_projection = nn.Linear(embedding_dimension, embedding_dimension)
         self.V_projection = nn.Linear(embedding_dimension, embedding_dimension)
         self.scaled_dot_product_attention = ScaledDotProductAttention()
-        self.linear = nn.Linear(embedding_dimension, embedding_dimension)
+        self.out_proj = nn.Linear(embedding_dimension, embedding_dimension)
 
     def forward(self, Q, K, V, mask: Optional[torch.Tensor] = None):
         Q_proj = self.Q_projection(Q)
@@ -112,7 +112,7 @@ class MultiHeadAttention(nn.Module):
             dim=-1  # We concatenate on the features dimension.
         )  # output shape: (num_batches, num_tokens, embedding_dimension)
 
-        return self.linear(x)  # output shape: (num_batches, num_tokens, embedding_dimension)
+        return self.out_proj(x)  # output shape: (num_batches, num_tokens, embedding_dimension)
 
 
 class TransformerEncoderBlock(nn.Module):
@@ -179,6 +179,7 @@ class TransformerDecoderBlock(nn.Module):
         self.feedforward = nn.Sequential(
             nn.Linear(embedding_dimension, feedforward_dimension),
             nn.ReLU(),
+            # In PyTorch implementation they put a Dropout() here too,
             nn.Linear(feedforward_dimension, embedding_dimension)
         )
         self.dropout_3 = nn.Dropout(p=dropout_probability)
@@ -256,7 +257,7 @@ class Transformer(nn.Module):
             )
             for _ in range(n_layers)
         ])
-        self.fully_connected_layer = nn.Linear(embedding_dimension, decoder_vocabulary_dimension)
+        self.out_proj = nn.Linear(embedding_dimension, decoder_vocabulary_dimension)
 
     def forward(
             self,
@@ -267,7 +268,6 @@ class Transformer(nn.Module):
             decoder_cross_attention_mask: Optional[torch.Tensor] = None
 
     ):
-        # todo: maybe it's better to just factorise this function in demo.py
         encoder_input_embeddings = self.positional_encoding_block(self.encoder_embedding_block(encoder_input_tokens))
         decoder_input_embeddings = self.positional_encoding_block(self.decoder_embedding_block(decoder_input_tokens))
         # todo: do we need to detach() the masks?
@@ -285,7 +285,7 @@ class Transformer(nn.Module):
                 self_attention_mask=decoder_self_attention_mask,  # We need to feed the mask to each layer, not only the first one.  # noqa
                 cross_attention_mask=decoder_cross_attention_mask,
             )
-        return self.fully_connected_layer(decoder_output) # noqa
+        return self.out_proj(decoder_output) # noqa
 
     def run_inference(
             self,
@@ -295,7 +295,7 @@ class Transformer(nn.Module):
             decoder_vocab: torchtext.vocab.vocab,
             max_decoder_length: int
     ):
-
+        # todo: maybe it's better to just factorise this function in demo.py
         encoder_tokens_str = encoder_tokenizer(encoder_sentence)
         encoder_s2i = encoder_vocab.get_stoi()
         decoder_i2s = decoder_vocab.get_itos()
@@ -338,6 +338,91 @@ class Transformer(nn.Module):
             str_tokens = [t if t != '\n' else '\\n' for t in str_tokens]
         return " ".join(str_tokens)  # noqa
 
+
+# ============== PyTorch Transformer Wrapper =============
+class PyTorchTransformer(nn.Module):
+    def __init__(
+            self,
+            encoder_vocabulary_dimension: int,
+            decoder_vocabulary_dimension: int,
+            max_number_of_expected_tokens: int,
+            embedding_dimension: int,
+            n_layers: int,
+            number_of_attention_heads: int,
+            feedforward_dimension: int,
+            dropout_probability: float = 0.0
+    ):
+        super(PyTorchTransformer, self).__init__()
+
+        self.number_of_attention_heads = number_of_attention_heads
+
+        self.encoder_embedding_block = EmbeddingBlock(encoder_vocabulary_dimension, embedding_dimension)
+        self.positional_encoding_block = PositionalEncoding(
+            embedding_dim=embedding_dimension,
+            max_tokens=max_number_of_expected_tokens,
+            scalar=max_number_of_expected_tokens,
+            dropout_probability=dropout_probability
+        )
+        self.decoder_embedding_block = EmbeddingBlock(decoder_vocabulary_dimension, embedding_dimension)
+        self.transformer = torch.nn.Transformer(
+                d_model=embedding_dimension,
+                nhead=number_of_attention_heads,
+                num_encoder_layers=n_layers,
+                num_decoder_layers=n_layers,
+                dim_feedforward=feedforward_dimension,
+                dropout=dropout_probability,
+                batch_first=True
+            )
+        self.out_proj = nn.Linear(embedding_dimension, decoder_vocabulary_dimension)
+
+    def forward(
+            self,
+            encoder_input_tokens: torch.Tensor,
+            decoder_input_tokens: torch.Tensor,
+            encoder_self_attention_mask: Optional[torch.Tensor] = None,
+            decoder_self_attention_mask: Optional[torch.Tensor] = None,
+            decoder_cross_attention_mask: Optional[torch.Tensor] = None  # Useless, just here for compatibility.
+    ):
+
+        encoder_input_embeddings = self.positional_encoding_block(self.encoder_embedding_block(encoder_input_tokens))
+        decoder_input_embeddings = self.positional_encoding_block(self.decoder_embedding_block(decoder_input_tokens))
+        """
+        forward() useful arguments for PyTorch's Transformer:
+            NAME           EXPECTED TYPE/SHAPE            NEEDED FOR TRAINING
+            ----------------------------------------------------------------
+            src:                   (N,S,E)                     True  
+            tgt:                   (N,T,E)                     True
+            src_mask:       (S,S) or (N*nhead, S, S)           False
+            tgt_mask:       (T,T) or (N*nhead, T, T)           False (it will be enough to set tgt_is_causal=True)
+            memory_mask:             (T,S)                     False
+            src_key_padding_mask:    (N,S)                     True
+            tgt_key_padding_mask:    (N,T)                     True
+            memory_key_padding_mask: (N,S)                     True
+            src_is_causal            BOOLEAN                   False
+            tgt_is_causal            BOOLEAN                   True
+        """
+        # Important: In PyTorch's implementation the values where the mask is True are NOT allowed to attend,
+        # and viceversa.
+        # This is the opposite of how I implemented it.
+        # TODO: do the same.
+
+        tgt_mask = decoder_self_attention_mask.repeat_interleave(
+            self.number_of_attention_heads, dim=0
+        )
+        # TODO: why does it want a different mask for each attention head?
+        decoder_output = self.transformer(
+            src=encoder_input_embeddings,
+            tgt=decoder_input_embeddings,
+            tgt_mask=~tgt_mask,  # todo: remove tilde once you'll change the mask creation script
+            src_key_padding_mask=~encoder_self_attention_mask[:,0,:], # todo: remove tilde once you'll change the mask creation script # noqa
+            tgt_key_padding_mask=~decoder_self_attention_mask[:,0,:], # todo: remove tilde once you'll change the mask creation script # noqa
+            memory_key_padding_mask=~encoder_self_attention_mask[:,0,:], # todo: remove tilde once you'll change the mask creation script # noqa
+            src_is_causal=False,
+            tgt_is_causal=True  # todo: if I put this to False nothing changes. what's the purpose of this?
+        )
+        return self.out_proj(decoder_output)
+
+# =======================================================
 
 
 

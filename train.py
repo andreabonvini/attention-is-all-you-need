@@ -13,11 +13,23 @@ import torch
 
 from torch.optim.lr_scheduler import LambdaLR
 
+from code.transformer import PyTorchTransformer
+
+# TODO:
+"""
+- Write code to verify single batch
+- Check on the effects of not shuffling the data when retrieving each batch.
+- Check training loss and validation values with no label smoothing
+- Should we strip away all the "\n" in the encoder, decoder etc...?
+- Use PyTorch official implementation to run a training session!
+- Why in the official PyTorch implementation there's an extra dropout after Relu?
+"""
+
 
 def get_current_lr(
         d_model: int,  # noqa
         step_num: int,
-        warmup_steps: int
+        n_warmup_steps: int
 ) -> float:
     # From section 5.3: "We used the Adam optimizer [20] with β1 = 0.9, β2 = 0.98 and ε = 10−9."
     # "We varied the learning rate over the course of training, according to the formula:
@@ -26,7 +38,7 @@ def get_current_lr(
     # and decreasing it thereafter proportionally to the inverse square root of the step number.
     # We used warmup_steps = 4000"
     step_num = max(step_num, 1)  # just to avoid 0^(-0.5)
-    return d_model ** (-0.5) * min(step_num ** (-0.5), step_num * warmup_steps ** (-1.5))
+    return d_model ** (-0.5) * min(step_num ** (-0.5), step_num * n_warmup_steps ** (-1.5))
 
 
 # TODO: UNDERSTAND IF YOU NEED <eos> token in decoder input during training
@@ -34,27 +46,43 @@ def get_current_lr(
 def get_config() -> Dict:
     parser = argparse.ArgumentParser(description='Script to train a Transformer model.')
     parser.add_argument('-c', '--config_path', required=True)
-    args = parser.parse_args()
-    with open(args.config_path) as f:
-        config = json.load(f)
+    command_line_args = parser.parse_args()
+    with open(command_line_args.config_path) as config_f:
+        config = json.load(config_f)
     return config
 
 
 if __name__ == '__main__':
 
+    overfit_single_batch = True
+
+    # Setup
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print("USING DEVICE: ", device)
+    print("===> Using DEVICE: ", device)
     config_dict = get_config()
     n_epochs = config_dict["training"]["n_epochs"]
+    adam_base_lr = config_dict["training"]["adam_base_lr"]
+    adam_beta_0 = config_dict["training"]["adam_beta_0"]
+    adam_beta_1 = config_dict["training"]["adam_beta_1"]
+    adam_eps = config_dict["training"]["adam_eps"]
+    label_smoothing_perc = config_dict["training"]["label_smoothing_perc"]
+    use_pytorch_transformer_class = config_dict["use_pytorch_transformer_class"]
 
     data_source = German2EnglishDataFactory(batch_size=config_dict["dataset"]["batch_size"])
-    args = config_dict["transformer_params"]
-    args.update(
+
+    transformer_args = config_dict["transformer_params"]
+    transformer_args.update(
         {
             "encoder_vocabulary_dimension": data_source.get_encoder_vocab_size(),
             "decoder_vocabulary_dimension": data_source.get_decoder_vocab_size()
         }
     )
+
+    if overfit_single_batch:
+        print("MESSAGE: Since we're trying to overfit a single batch, "
+              "we force the 'dropout_probability' and 'label_smoothing_perc' parameters to be 0.0'.")
+        transformer_args["dropout_probability"] = 0.0
+        label_smoothing_perc = 0.0  # noqa
 
     checkpoint_folder = config_dict["training"]["checkpoint_folder"]
     checkpoint_file = config_dict["training"]["checkpoint_file"]
@@ -64,7 +92,7 @@ if __name__ == '__main__':
     val_loss_list_path = os.path.join(checkpoint_folder, "val_loss_list.txt")
 
     # TODO: add consistency check for model parameters...
-    if checkpoint_file is not None:
+    if checkpoint_file is not None and not overfit_single_batch:
         checkpoint_path = os.path.join(checkpoint_folder, checkpoint_file)
         assert os.path.isfile(checkpoint_path)
         assert os.path.isfile(train_loss_list_path)
@@ -76,56 +104,97 @@ if __name__ == '__main__':
         checkpoint_transformer_args = state_dict['transformer_args']
         transformer_state_dict = state_dict['transformer_state_dict']
         optimizer_state_dict = state_dict['optimizer_state_dict']
+        lr_scheduler_state_dict = state_dict['lr_scheduler_state_dict']
         best_train_loss = state_dict['best_training_loss']
         best_val_loss = state_dict['best_validation_loss']
-        if checkpoint_transformer_args != args:
+        if checkpoint_transformer_args != transformer_args:
             print(
-                f"Warning: the model specified in {checkpoint_path} "
+                f"Error: the model specified in {checkpoint_path} "
                 f"has different parameters than the ones specified in the input configuration."
             )
-        transformer = Transformer(**checkpoint_transformer_args)
+            torch.cuda.empty_cache()
+            exit(-1)
+
+        if use_pytorch_transformer_class != state_dict['use_pytorch_transformer_class']:
+            print(
+                f"Error: the model specified in {checkpoint_path} "
+                f"was instantiated with a different class wrt to the one specified in the input configuration."
+            )
+            torch.cuda.empty_cache()
+            exit(-1)
+
+        if use_pytorch_transformer_class:
+            print(f"===> Retrieving PyTorchTransformer model ...")
+            transformer = PyTorchTransformer(**checkpoint_transformer_args)
+        else:
+            print(f"===> Retrieving Transformer model ...")
+            transformer = Transformer(**checkpoint_transformer_args)
         transformer.load_state_dict(transformer_state_dict)
-        transformer = transformer.to(device)
+
     else:
-        print(f"===> Creating new Transformer model ...")
-        transformer = Transformer(**args).to(device)
+        if use_pytorch_transformer_class:
+            print(f"===> Creating new PyTorchTransformer model ...")
+            transformer = PyTorchTransformer(**transformer_args)
+        else:
+            print(f"===> Creating new Transformer model ...")
+            transformer = Transformer(**transformer_args)
+
+        for p in transformer.parameters():
+            if p.dim() > 1:  # todo: from annotated-transformer, find rationale
+                torch.nn.init.xavier_uniform_(p)
         start_epoch = 0
         best_val_loss = + np.inf
         best_train_loss = + np.inf
 
+    transformer = transformer.to(device)
+
     train_iter, val_iter, test_iter = data_source.get_data()
     train_info = data_source.get_training_info()
     val_info = data_source.get_validation_info()
+
+    # We manually increase the weights associated with the tokens that represent the end of a sentence.
+    train_info["weights"][data_source.get_decoder_vocab()["<eos>"]] *= 10
+    train_info["weights"][data_source.get_decoder_vocab()["."]] *= 10
+    val_info["weights"][data_source.get_decoder_vocab()["<eos>"]] *= 10
+    val_info["weights"][data_source.get_decoder_vocab()["."]] *= 10
+
     # From section 5.4: "During training, we employed label smoothing of value ε=0.1 .
     # This hurts perplexity, as the model learns to be more unsure, but improves accuracy and BLEU score."
     loss_fn = torch.nn.CrossEntropyLoss(
-        weight=train_info["weights"].to(device),
+        weight=train_info["weights"].to(device) if not overfit_single_batch else None,
         ignore_index=data_source.get_decoder_pad_token(),
-        label_smoothing=0.1
+        label_smoothing=label_smoothing_perc
     )
 
     loss_fn_val = torch.nn.CrossEntropyLoss(
-        weight=val_info["weights"].to(device),
+        weight=val_info["weights"].to(device) if not overfit_single_batch else None,
         ignore_index=data_source.get_decoder_pad_token()
     )
     # Note that in PyTorch CrossEntropyLoss already computed softmax, this is why we didn't include it in our
     # Transformer definition!
     # From section 5.3: "We used the Adam optimizer [20] with β1 = 0.9, β2 = 0.98 and ε = 10−9."
-    optimizer = torch.optim.Adam(transformer.parameters(), lr=1, betas=(0.9, 0.98),
-                                 eps=1e-9)  # fixme: is lr=1 as a starting point correct?  # noqa
+    optimizer = torch.optim.Adam(
+        transformer.parameters(),
+        lr=adam_base_lr,
+        betas=(adam_beta_0, adam_beta_1),
+        eps=adam_eps
+    )
 
-    # fixme: why training loss and validation loss are that different during thre training prvess? e. g 21 vs 7
-    if checkpoint_file is not None:
-        optimizer.load_state_dict(optimizer_state_dict)
+    if checkpoint_file is not None and not overfit_single_batch:
+        optimizer.load_state_dict(optimizer_state_dict)  # noqa
 
     lr_scheduler = LambdaLR(
         optimizer=optimizer,
         lr_lambda=lambda step: get_current_lr(
-            d_model=transformer.embedding_dimension, step_num=step, warmup_steps=warmup_steps
+            d_model=transformer_args["embedding_dimension"], step_num=step, n_warmup_steps=warmup_steps
         )
     )
+
+    if checkpoint_file is not None and not overfit_single_batch:
+        lr_scheduler.load_state_dict(lr_scheduler_state_dict)  # noqa
+
     # IMPORTANT: Note that the way we schedule the learning rate here is fundamental to assure
-    # that the model learns properly. We increase the learning rate linearly for 4000 epochs, and then we decrease it
+    # that the model learns properly. We increase the learning rate linearly for 4000 steps, and then we decrease it
     # exponentially.
 
     mean_train_loss = 0.0
@@ -135,20 +204,27 @@ if __name__ == '__main__':
         mean_train_loss, mean_val_loss, best_train_loss, best_val_loss
     )
 
+    if overfit_single_batch:
+        single_batch_dict = next(iter(train_iter))
+        n_samples_single_batch = torch.sum(single_batch_dict["target"] != data_source.get_decoder_pad_token()).item()  # noqa
+
     with tqdm(
             total=n_epochs,
             initial=start_epoch,
-            position=0, leave=True,
+            position=0,
+            leave=True,
             desc=base_desc
     ) as pbar:
 
         for epoch_index in range(start_epoch, n_epochs):
 
             # ==== Start Training Loop ====
-            n = len(train_iter)
+            n = len(train_iter) if overfit_single_batch else 1
             i = 0
             transformer.train()
             for batch_dict in train_iter:
+                if overfit_single_batch:
+                    batch_dict = single_batch_dict  # noqa
                 i += 1
                 pbar.set_description(base_desc + f" ==> (Training batch {i}/{n})")
                 # Unpack dictionary
@@ -174,69 +250,82 @@ if __name__ == '__main__':
                 lr_scheduler.step()
                 # todo: update step counter on pbar
                 mean_train_loss = loss.item() * target_batch.size(0)
+                if overfit_single_batch:
+                    break
 
             # ==== Start Validation Loop ====
 
-            transformer.eval()
-            n = len(val_iter)
-            i = 0
-            for batch_dict in val_iter:
-                i += 1
-                pbar.set_description(base_desc + f" ==> (Validation batch {i}/{n})")
-                # Unpack dictionary
-                encoder_input_batch = batch_dict["encoder_input"].to(device)
-                decoder_input_batch = batch_dict["decoder_input"].to(device)
-                encoder_self_attention_mask = batch_dict["encoder_self_attention_mask"].to(device)
-                decoder_self_attention_mask = batch_dict["decoder_self_attention_mask"].to(device)
-                decoder_cross_attention_mask = batch_dict["decoder_cross_attention_mask"].to(device)
-                target_batch = batch_dict["target"].to(device)
+            if overfit_single_batch:
+                # Skip validation
+                pass
+            else:
+                transformer.eval()
+                n = len(val_iter)
+                i = 0
+                for batch_dict in val_iter:
+                    i += 1
+                    pbar.set_description(base_desc + f" ==> (Validation batch {i}/{n})")
+                    # Unpack dictionary
+                    encoder_input_batch = batch_dict["encoder_input"].to(device)
+                    decoder_input_batch = batch_dict["decoder_input"].to(device)
+                    encoder_self_attention_mask = batch_dict["encoder_self_attention_mask"].to(device)
+                    decoder_self_attention_mask = batch_dict["decoder_self_attention_mask"].to(device)
+                    decoder_cross_attention_mask = batch_dict["decoder_cross_attention_mask"].to(device)
+                    target_batch = batch_dict["target"].to(device)
 
-                with torch.no_grad():
-                    out = transformer(
-                        encoder_input_tokens=encoder_input_batch,
-                        decoder_input_tokens=decoder_input_batch,
-                        encoder_self_attention_mask=encoder_self_attention_mask,
-                        decoder_self_attention_mask=decoder_self_attention_mask,
-                        decoder_cross_attention_mask=decoder_cross_attention_mask
-                    )
-                    val_loss = loss_fn_val(out.view(-1, data_source.get_decoder_vocab_size()),
-                                           target=target_batch.view(-1))
-                    mean_val_loss = val_loss.item() * target_batch.size(0)
+                    with torch.no_grad():
+                        out = transformer(
+                            encoder_input_tokens=encoder_input_batch,
+                            decoder_input_tokens=decoder_input_batch,
+                            encoder_self_attention_mask=encoder_self_attention_mask,
+                            decoder_self_attention_mask=decoder_self_attention_mask,
+                            decoder_cross_attention_mask=decoder_cross_attention_mask
+                        )
+                        val_loss = loss_fn_val(out.view(-1, data_source.get_decoder_vocab_size()),
+                                               target=target_batch.view(-1))
+                        mean_val_loss = val_loss.item() * target_batch.size(0)
 
             # Compute mean losses and serialize
-            mean_train_loss = mean_train_loss/train_info["n_samples"]
+            mean_train_loss = mean_train_loss / (
+                train_info["n_samples"] if not overfit_single_batch else n_samples_single_batch  # noqa
+            )
             mean_val_loss = mean_val_loss/val_info["n_samples"]
 
-            if mean_train_loss < best_train_loss:
+            if mean_train_loss < best_train_loss and not overfit_single_batch:
                 best_train_loss = mean_train_loss
                 checkpoint_path = os.path.join(checkpoint_folder, f"train_checkpoint.pt")
                 torch.save(
                     {
                         'epoch': epoch_index,
-                        'transformer_args': args,
+                        'use_pytorch_transformer_class': use_pytorch_transformer_class,
+                        'transformer_args': transformer_args,
                         'transformer_state_dict': transformer.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
+                        'lr_scheduler_state_dict': lr_scheduler.state_dict(),
                         'best_training_loss': best_train_loss,
                         'best_validation_loss': best_val_loss
                     },
                     checkpoint_path
                 )
 
-            with open(train_loss_list_path, "a") as f:
-                f.write(f"{str(epoch_index).zfill(4)}: {mean_train_loss}\n")
-            with open(val_loss_list_path, "a") as f:
-                f.write(f"{str(epoch_index).zfill(4)}: {mean_val_loss}\n")
+            if not overfit_single_batch:
+                with open(train_loss_list_path, "a") as f:
+                    f.write(f"{str(epoch_index).zfill(4)}: {mean_train_loss}\n")
+                with open(val_loss_list_path, "a") as f:
+                    f.write(f"{str(epoch_index).zfill(4)}: {mean_val_loss}\n")
 
-            if mean_val_loss < best_val_loss:
+            if mean_val_loss < best_val_loss and not overfit_single_batch:
                 print(f" <<[NEW BEST MODEL]>>")
                 best_val_loss = mean_val_loss
                 checkpoint_path = os.path.join(checkpoint_folder, f"val_checkpoint.pt")
                 torch.save(
                     {
                         'epoch': epoch_index,
-                        'transformer_args': args,
+                        'use_pytorch_transformer_class': use_pytorch_transformer_class,
+                        'transformer_args': transformer_args,
                         'transformer_state_dict': transformer.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
+                        'lr_scheduler_state_dict': lr_scheduler.state_dict(),
                         'best_training_loss': best_train_loss,
                         'best_validation_loss': best_val_loss
                     },

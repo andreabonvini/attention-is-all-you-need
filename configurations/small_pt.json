@@ -1,24 +1,24 @@
 {
-    "use_pytorch_transformer_class": false,
+    "use_pytorch_transformer_class": true,
     "dataset": {
-        "batch_size": 512
+        "batch_size": 1024
     },
     "training": {
         "n_epochs": 2000,
-        "warmup_steps": 4000,
+        "warmup_steps": 2000,
         "adam_base_lr": 1.0,
         "adam_beta_0": 0.9,
         "adam_beta_1": 0.98,
         "adam_eps": 1e-9,
         "label_smoothing_perc": 0.0,
-        "checkpoint_folder": "checkpoint_original_model_base",
+        "checkpoint_folder": "checkpoint_original_model_small_pt",
         "checkpoint_file": null
     },
     "transformer_params": {
-        "embedding_dimension": 512,
-        "n_layers": 6,
-        "number_of_attention_heads": 8,
-        "feedforward_dimension": 2048,
+        "embedding_dimension": 256,
+        "n_layers": 4,
+        "number_of_attention_heads": 4,
+        "feedforward_dimension": 512,
         "dropout_probability": 0.1,
         "max_number_of_expected_tokens": 64
     }

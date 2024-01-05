@@ -67,7 +67,7 @@ class German2EnglishDataFactory:
         counter = Counter()
         with io.open(filepath, encoding="utf8") as f:
             for string_ in f:
-                counter.update(tokenizer(string_))
+                counter.update(tokenizer(string_.strip("\n")))
         sorted_by_freq_tuples = sorted(counter.items(), key=lambda x: x[1], reverse=True)
         ordered_dict = OrderedDict(sorted_by_freq_tuples)
         return vocab(ordered_dict, specials=['<unk>', '<pad>', '<bos>', '<eos>'])
@@ -77,8 +77,8 @@ class German2EnglishDataFactory:
         raw_decoder_iter = iter(io.open(filepaths[1], encoding="utf8"))
         data = []
         for (raw_encoder, raw_decoder) in zip(raw_encoder_iter, raw_decoder_iter):
-            encoder_tokens_ = [self.encoder_vocab[token] for token in self.encoder_tokenizer(raw_encoder)]
-            decoder_tokens_ = [self.decoder_vocab[token] for token in self.decoder_tokenizer(raw_decoder)]
+            encoder_tokens_ = [self.encoder_vocab[token] for token in self.encoder_tokenizer(raw_encoder.strip("\n"))]
+            decoder_tokens_ = [self.decoder_vocab[token] for token in self.decoder_tokenizer(raw_decoder.strip("\n"))]
             data.append((encoder_tokens_, decoder_tokens_))
         return data
 

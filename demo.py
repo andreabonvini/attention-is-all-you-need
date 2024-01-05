@@ -1,4 +1,6 @@
 import argparse
+
+from code import Transformer
 from code.datasets import German2EnglishDataFactory
 import torch
 
@@ -38,7 +40,10 @@ if __name__ == "__main__":
             decoder_vocab.get_itos()[t] for t in target_sentence_tokens
             if t not in (decoder_vocab["<bos>"], decoder_vocab["<eos>"], decoder_vocab["<pad>"])
         ])
-        transformer_model = torch.load(checkpoint_path, map_location="cpu")
+
+        ckp = torch.load(checkpoint_path, map_location="cpu")
+        transformer_model = Transformer(**ckp["transformer_args"])
+        transformer_model.load_state_dict(ckp["transformer_state_dict"])
 
         print("Running inference...")
         translated_sentence = transformer_model.run_inference(
