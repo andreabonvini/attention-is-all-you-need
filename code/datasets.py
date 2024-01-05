@@ -3,7 +3,7 @@ from torch.nn.functional import pad
 from torch.utils.data import DataLoader
 from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import vocab
-from collections import Counter, OrderedDict, defaultdict
+from collections import Counter, OrderedDict
 from torchtext.utils import extract_archive
 import numpy as np
 from tqdm import tqdm
@@ -172,38 +172,36 @@ class German2EnglishDataFactory:
 
     def get_data(self):
         train_iter = DataLoader(self.train_data, batch_size=self.batch_size,
-                                shuffle=True, collate_fn=self.generate_batch)
+                                shuffle=False, collate_fn=self.generate_batch)
         valid_iter = DataLoader(self.val_data, batch_size=self.batch_size,
-                                shuffle=True, collate_fn=self.generate_batch)
+                                shuffle=False, collate_fn=self.generate_batch)
         test_iter = DataLoader(self.test_data, batch_size=self.batch_size,
-                               shuffle=True, collate_fn=self.generate_batch)
+                               shuffle=False, collate_fn=self.generate_batch)
         return train_iter, valid_iter, test_iter
 
-    def get_training_weights(self):
-
-        print("Computing training target weights...")
-
-        train_iter = DataLoader(self.train_data, batch_size=1,
-                                shuffle=True, collate_fn=self.generate_batch)
-        label_counter = defaultdict(int)
-        # total_number_of_samples = 0
-        for batch_dict in tqdm(train_iter):
+    def _get_weights(self, data_loader: DataLoader, description: str = ""):
+        counter = Counter()
+        for batch_dict in tqdm(data_loader, desc=description):
             target_batch = batch_dict["target"]
             assert len(target_batch.shape) == 2  # batch_dim, n_tokens
-            for sample in range(target_batch.size(0)):
-                for target_token in range(target_batch.size(1)):
-                    tok = target_batch[sample, target_token].item()
-                    if tok != self.get_decoder_pad_token():
-                        label_counter[tok] += 1
-            # total_number_of_samples += torch.sum(target_batch != data_source.get_decoder_pad_token()).item()  # noqa
-
-        key_value_tuples = label_counter.items()
-        n_classes = len(key_value_tuples)
-        # weights = [(1 / kv[1]) * total_number_of_samples / n_classes for kv in key_value_tuples]
-        sum_one_over_nc = np.sum([(1 / kv[1]) for kv in key_value_tuples])
-        weights_dict = {kv[0]: (1 / kv[1]) * n_classes / sum_one_over_nc for kv in key_value_tuples}
+            counter.update(target_batch.numpy().flatten())
+        assert self.get_decoder_pad_token() in counter
+        assert self.get_decoder_vocab()["<bos>"] not in counter  # There shouldn't be any <bos> token in the decoder's target!  # noqa
+        counter[self.get_decoder_pad_token()] = 0  # The <pad> will be ignored during training, we don't need to count them to compute the weights.  # noqa
+        total_number_of_samples = counter.total()  # noqa
         weights = torch.zeros(self.get_decoder_vocab_size())
         for c in range(self.get_decoder_vocab_size()):
-            if c in weights_dict:
-                weights[c] = weights_dict[c]
+            if c in counter.keys():
+                weights[c] = total_number_of_samples / (counter[c] * len(counter.keys()))\
+                    if c != self.get_decoder_pad_token() else 0.0
         return weights
+
+    def get_training_weights(self):
+        train_iter = DataLoader(self.train_data, batch_size=1,
+                                shuffle=True, collate_fn=self.generate_batch)
+        return self._get_weights(train_iter, "Computing training target weights...")
+
+    def get_validation_weights(self):
+        train_iter = DataLoader(self.val_data, batch_size=1,
+                                shuffle=True, collate_fn=self.generate_batch)
+        return self._get_weights(train_iter, "Computing validation target weights...")

@@ -210,7 +210,7 @@ class Transformer(nn.Module):
             self,
             encoder_vocabulary_dimension: int,
             decoder_vocabulary_dimension: int,
-            max_tokens: int,
+            max_number_of_expected_tokens: int,
             embedding_dimension: int,
             n_layers: int,
             number_of_attention_heads: int,
@@ -221,7 +221,13 @@ class Transformer(nn.Module):
 
         self.encoder_embedding_block = EmbeddingBlock(encoder_vocabulary_dimension, embedding_dimension)
         self.positional_encoding_block = PositionalEncoding(
-            embedding_dimension, max_tokens, dropout_probability=dropout_probability
+            embedding_dim=embedding_dimension,
+            max_tokens=max_number_of_expected_tokens,
+            scalar=max_number_of_expected_tokens,  # Since the dataset we're using here has pretty short contexts,
+            # we use max_number_of_expected_tokens instead of 1e4 as scalar to get more "evenly distributed" positional
+            # embeddings.
+            # (Plot the two alternatives to understand the differences...)
+            dropout_probability=dropout_probability
         )
         self.decoder_embedding_block = EmbeddingBlock(decoder_vocabulary_dimension, embedding_dimension)
         self.embedding_dimension = embedding_dimension
@@ -303,24 +309,34 @@ class Transformer(nn.Module):
         current_decoder_output_length = 0
         last_decoder_output_token = decoder_vocab['<bos>']
         batch_length = 1
-        decoder_tokens = torch.ones(batch_length, max_decoder_length).long() * decoder_vocab['<pad>']
+        decoder_tokens = torch.ones(batch_length, 1).long()
 
         self.eval()
 
+        decoder_pad_function = torch.nn.ConstantPad1d((0, 1), decoder_vocab['<pad>'])
+
+        # TODO: BYPASS ENCODER OUTPUT RE-COMPUTATION
+
         while current_decoder_output_length < max_decoder_length and last_decoder_output_token != decoder_vocab['<eos>']:
             decoder_tokens[0, current_decoder_output_length] = last_decoder_output_token
-            n_tokens_decoder = max_decoder_length
+            decoder_tokens = decoder_pad_function(decoder_tokens)
+            n_tokens_decoder = decoder_tokens.size(1)
             n_tokens_encoder = encoder_tokens.size(1)
+            decoder_self_attention_mask = torch.ones(n_tokens_decoder, n_tokens_decoder).bool() & (
+                        decoder_tokens != decoder_vocab['<pad>']).unsqueeze(0)  # add batch dimension
             decoder_cross_attention_mask = torch.ones(n_tokens_decoder, n_tokens_encoder).bool() & (
                         encoder_tokens != encoder_vocab['<pad>']).unsqueeze(0)  # add batch dimension
             output = self.forward(
                 encoder_input_tokens=encoder_tokens,
                 decoder_input_tokens=decoder_tokens,
+                decoder_self_attention_mask=decoder_self_attention_mask,
                 decoder_cross_attention_mask=decoder_cross_attention_mask
             )
             last_decoder_output_token = torch.argmax(output[0][current_decoder_output_length])
             current_decoder_output_length += 1
-        return " ".join([decoder_i2s[torch.argmax(logits)] for logits in output[0]])  # noqa
+            str_tokens = [decoder_i2s[torch.argmax(logits)] for logits in output[0]]
+            str_tokens = [t if t != '\n' else '\\n' for t in str_tokens]
+        return " ".join(str_tokens)  # noqa
 
 
 

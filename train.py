@@ -1,15 +1,15 @@
 import os
 
 import numpy as np
+import warnings
 
 from code import Transformer
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from code.datasets import German2EnglishDataFactory
 import argparse
 import json
 from typing import Dict
 import torch
-from datetime import datetime
 
 from torch.optim.lr_scheduler import LambdaLR
 
@@ -40,9 +40,26 @@ def get_config() -> Dict:
     return config
 
 
+def torch_compile_check():
+    gpu_ok = False
+    if torch.cuda.is_available():
+        device_cap = torch.cuda.get_device_capability()
+        if device_cap in ((7, 0), (8, 0), (9, 0)):
+            gpu_ok = True
+
+    if not gpu_ok:
+        warnings.warn(
+            "GPU is not NVIDIA V100, A100, or H100. Speedup numbers may be lower "
+            "than expected."
+        )
+    else:
+        print("GPU should support model compilation with torch.compile()!")
+
+
 if __name__ == '__main__':
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    torch_compile_check()
 
     config_dict = get_config()
     n_epochs = config_dict["training"]["n_epochs"]
@@ -52,8 +69,7 @@ if __name__ == '__main__':
     args.update(
         {
             "encoder_vocabulary_dimension": data_source.get_encoder_vocab_size(),
-            "decoder_vocabulary_dimension": data_source.get_decoder_vocab_size(),
-            "max_tokens": 2048,
+            "decoder_vocabulary_dimension": data_source.get_decoder_vocab_size()
         }
     )
 
@@ -69,16 +85,31 @@ if __name__ == '__main__':
         assert os.path.isfile(checkpoint_path)
         assert os.path.isfile(train_loss_list_path)
         assert os.path.isfile(val_loss_list_path)
-        transformer = torch.load(checkpoint_path)
-        start_epoch = int(checkpoint_file.split(".")[0].split("_")[-1])
+        state_dict = torch.load(checkpoint_path)
+        start_epoch = state_dict['epoch']
         assert start_epoch < n_epochs
         print(f"===> Restarting from epoch {start_epoch} ...")
+        checkpoint_transformer_args = state_dict['transformer_args']
+        transformer_state_dict = state_dict['transformer_state_dict']
+        optimizer_state_dict = state_dict['optimizer_state_dict']
+        best_train_loss = state_dict['best_training_loss']
+        best_val_loss = state_dict['best_validation_loss']
+        if checkpoint_transformer_args != args:
+            print(
+                f"Warning: the model specified in {checkpoint_path} "
+                f"has different parameters than the ones specified in the input configuration."
+            )
+        transformer = Transformer(**checkpoint_transformer_args)
+        transformer.load_state_dict(transformer_state_dict)
+        transformer = transformer.to(device)
     else:
-        transformer = Transformer(**args).to(device)
         print(f"===> Creating new Transformer model ...")
+        transformer = Transformer(**args).to(device)
         start_epoch = 0
+        best_val_loss = + np.inf
+        best_train_loss = + np.inf
 
-    transformer = torch.compile(transformer) # Buggy OMP: Error #15: Initializing libomp.dylib, but found libiomp5.dylib already initialized.  # noqa
+    # transformer = torch.compile(transformer) # Buggy OMP: Error #15: Initializing libomp.dylib, but found libiomp5.dylib already initialized.  # noqa
 
     train_iter, val_iter, test_iter = data_source.get_data()
 
@@ -89,71 +120,61 @@ if __name__ == '__main__':
         ignore_index=data_source.get_decoder_pad_token(),
         label_smoothing=0.1
     )
+
+    loss_fn_val = torch.nn.CrossEntropyLoss(
+        weight=data_source.get_validation_weights().to(device),
+        ignore_index=data_source.get_decoder_pad_token()
+    )
     # Note that in PyTorch CrossEntropyLoss already computed softmax, this is why we didn't include it in our
     # Transformer definition!
-
     # From section 5.3: "We used the Adam optimizer [20] with β1 = 0.9, β2 = 0.98 and ε = 10−9."
-    optimizer = torch.optim.Adam(transformer.parameters(), lr=1, betas=(0.9, 0.98), eps=1e-9)
-    d_model = config_dict["transformer_params"]["embedding_dimension"]
+    optimizer = torch.optim.Adam(transformer.parameters(), lr=1, betas=(0.9, 0.98),
+                                 eps=1e-9)  # fixme: is lr=1 as a starting point correct?  # noqa
+    if checkpoint_file is not None:
+        optimizer.load_state_dict(optimizer_state_dict)
+
     lr_scheduler = LambdaLR(
-        optimizer=optimizer, lr_lambda=lambda step: get_current_lr(d_model=d_model, step_num=step, warmup_steps=4000)
+        optimizer=optimizer,
+        lr_lambda=lambda step: get_current_lr(d_model=transformer.embedding_dimension, step_num=step, warmup_steps=4000)
     )
     # IMPORTANT: Note that the way we schedule the learning rate here is fundamental to assure
-    # that the model learns properly. We increase the learning rate linearly for 4000 epochs and then we decrease it
+    # that the model learns properly. We increase the learning rate linearly for 4000 epochs, and then we decrease it
     # exponentially.
 
     train_loss_list = []
     val_loss_list = []
+    mean_train_loss = 0.0
+    mean_val_loss = 0.0
 
-    best_val_loss = + np.inf
+    base_desc = "|| Train Loss: {:.4f} || Val Loss: {:.4f} || BEST Train Loss: {:.4f} || BEST Val Loss: {:.4f}".format(
+        mean_train_loss, mean_val_loss, best_train_loss, best_val_loss
+    )
 
-    for epoch_index in range(start_epoch, n_epochs):
+    with tqdm(
+            total=n_epochs,
+            initial=start_epoch,
+            position=0, leave=True,
+            desc=base_desc
+    ) as pbar:
 
-        # ==== Start Training Loop ====
-        transformer.train()
-        for batch_dict in tqdm(train_iter):
-            # Unpack dictionary
-            encoder_input_batch = batch_dict["encoder_input"].to(device)
-            decoder_input_batch = batch_dict["decoder_input"].to(device)
-            encoder_self_attention_mask = batch_dict["encoder_self_attention_mask"].to(device)
-            decoder_self_attention_mask = batch_dict["decoder_self_attention_mask"].to(device)
-            decoder_cross_attention_mask = batch_dict["decoder_cross_attention_mask"].to(device)
-            target_batch = batch_dict["target"].to(device)
+        for epoch_index in range(start_epoch, n_epochs):
 
-            optimizer.zero_grad()
-            out = transformer(
-                encoder_input_tokens=encoder_input_batch,
-                decoder_input_tokens=decoder_input_batch,
-                encoder_self_attention_mask=encoder_self_attention_mask,
-                decoder_self_attention_mask=decoder_self_attention_mask,
-                decoder_cross_attention_mask=decoder_cross_attention_mask
-            )
-            assert out.size(-1) == data_source.get_decoder_vocab_size()
-            loss = loss_fn(out.view(-1, data_source.get_decoder_vocab_size()), target=target_batch.view(-1))
-            loss.backward()
-            optimizer.step()
-            lr_scheduler.step()
-            train_loss_list.append(loss.item())
+            # ==== Start Training Loop ====
+            n = len(train_iter)
+            i = 0
+            transformer.train()
+            for batch_dict in train_iter:
+                i += 1
+                pbar.set_description(base_desc + f" ==> (Training batch {i}/{n})")
+                # Unpack dictionary
+                encoder_input_batch = batch_dict["encoder_input"].to(device)
+                decoder_input_batch = batch_dict["decoder_input"].to(device)
+                encoder_self_attention_mask = batch_dict["encoder_self_attention_mask"].to(device)
+                decoder_self_attention_mask = batch_dict["decoder_self_attention_mask"].to(device)
+                decoder_cross_attention_mask = batch_dict["decoder_cross_attention_mask"].to(device)
+                target_batch = batch_dict["target"].to(device)
 
-        mean_train_loss = np.mean(train_loss_list)
-        print(f"Train Loss @ epoch {str(epoch_index).zfill(3)}: {mean_train_loss}")
-        with open(train_loss_list_path, "a") as f:
-            f.write(f"{str(epoch_index).zfill(4)}: {mean_train_loss}\n")
-        train_loss_list = []
-
-        # ==== Start Validation Loop ====
-
-        transformer.eval()
-        for batch_dict in tqdm(val_iter):
-            # Unpack dictionary
-            encoder_input_batch = batch_dict["encoder_input"].to(device)
-            decoder_input_batch = batch_dict["decoder_input"].to(device)
-            encoder_self_attention_mask = batch_dict["encoder_self_attention_mask"].to(device)
-            decoder_self_attention_mask = batch_dict["decoder_self_attention_mask"].to(device)
-            decoder_cross_attention_mask = batch_dict["decoder_cross_attention_mask"].to(device)
-            target_batch = batch_dict["target"].to(device)
-
-            with torch.no_grad():
+                optimizer.zero_grad()
                 out = transformer(
                     encoder_input_tokens=encoder_input_batch,
                     decoder_input_tokens=decoder_input_batch,
@@ -161,19 +182,85 @@ if __name__ == '__main__':
                     decoder_self_attention_mask=decoder_self_attention_mask,
                     decoder_cross_attention_mask=decoder_cross_attention_mask
                 )
-                val_loss = loss_fn(out.view(-1, data_source.get_decoder_vocab_size()), target=target_batch.view(-1))
-                val_loss_list.append(val_loss.item())
+                assert out.size(-1) == data_source.get_decoder_vocab_size()
+                loss = loss_fn(out.view(-1, data_source.get_decoder_vocab_size()), target=target_batch.view(-1))
+                loss.backward()
+                optimizer.step()
+                lr_scheduler.step()
+                train_loss_list.append(loss.item())
 
-        mean_val_loss = np.mean(val_loss_list)
-        with open(val_loss_list_path, "a") as f:
-            f.write(f"{str(epoch_index).zfill(4)}: {mean_val_loss}\n")
-        if mean_val_loss < best_val_loss:
-            print(f"[NEW BEST MODEL!] Validation Loss @ epoch {str(epoch_index).zfill(4)}: {mean_val_loss}")
-            best_val_loss = mean_val_loss
-            # Save model checkpoint
-            checkpoint_path = os.path.join(checkpoint_folder, f"checkpoint_{str(epoch_index).zfill(4)}.pt")
-            torch.save(transformer, checkpoint_path)
-            print(f"Model saved @ {checkpoint_path}")
-        else:
-            print(f"Validation Loss @ epoch {str(epoch_index).zfill(4)}: {mean_val_loss}")
-        val_loss_list = []
+            # ==== Start Validation Loop ====
+
+            transformer.eval()
+            n = len(val_iter)
+            i = 0
+            for batch_dict in val_iter:
+                i += 1
+                pbar.set_description(base_desc + f" ==> (Validation batch {i}/{n})")
+                # Unpack dictionary
+                encoder_input_batch = batch_dict["encoder_input"].to(device)
+                decoder_input_batch = batch_dict["decoder_input"].to(device)
+                encoder_self_attention_mask = batch_dict["encoder_self_attention_mask"].to(device)
+                decoder_self_attention_mask = batch_dict["decoder_self_attention_mask"].to(device)
+                decoder_cross_attention_mask = batch_dict["decoder_cross_attention_mask"].to(device)
+                target_batch = batch_dict["target"].to(device)
+
+                with torch.no_grad():
+                    out = transformer(
+                        encoder_input_tokens=encoder_input_batch,
+                        decoder_input_tokens=decoder_input_batch,
+                        encoder_self_attention_mask=encoder_self_attention_mask,
+                        decoder_self_attention_mask=decoder_self_attention_mask,
+                        decoder_cross_attention_mask=decoder_cross_attention_mask
+                    )
+                    val_loss = loss_fn_val(out.view(-1, data_source.get_decoder_vocab_size()),
+                                           target=target_batch.view(-1))
+                    val_loss_list.append(val_loss.item())
+
+            # Compute mean losses and serialize
+            mean_train_loss = np.mean(train_loss_list)
+            mean_val_loss = np.mean(val_loss_list)
+
+            if mean_train_loss < best_train_loss:
+                best_train_loss = mean_train_loss
+                checkpoint_path = os.path.join(checkpoint_folder, f"train_checkpoint.pt")
+                torch.save(
+                    {
+                        'epoch': epoch_index,
+                        'transformer_args': args,
+                        'transformer_state_dict': transformer.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'best_training_loss': best_train_loss,
+                        'best_validation_loss': best_val_loss
+                    },
+                    checkpoint_path
+                )
+
+            with open(train_loss_list_path, "a") as f:
+                f.write(f"{str(epoch_index).zfill(4)}: {mean_train_loss}\n")
+            with open(val_loss_list_path, "a") as f:
+                f.write(f"{str(epoch_index).zfill(4)}: {mean_val_loss}\n")
+
+            if mean_val_loss < best_val_loss:
+                print(f"[NEW BEST MODEL!]")
+                best_val_loss = mean_val_loss
+                checkpoint_path = os.path.join(checkpoint_folder, f"val_checkpoint.pt")
+                torch.save(
+                    {
+                        'epoch': epoch_index,
+                        'transformer_args': args,
+                        'transformer_state_dict': transformer.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'best_training_loss': best_train_loss,
+                        'best_validation_loss': best_val_loss
+                    },
+                    checkpoint_path
+                )
+            train_loss_list = []
+            val_loss_list = []
+            pbar.update(1)
+            base_desc = "|| Train Loss: {:.4f} || Val Loss: {:.4f} || BEST Train Loss: {:.4f} || BEST Val Loss: {:.4f}".\
+                format(
+                    mean_train_loss, mean_val_loss, best_train_loss, best_val_loss
+                )
+            pbar.set_description(base_desc)
