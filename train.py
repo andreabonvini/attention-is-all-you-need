@@ -40,27 +40,10 @@ def get_config() -> Dict:
     return config
 
 
-def torch_compile_check():
-    gpu_ok = False
-    if torch.cuda.is_available():
-        device_cap = torch.cuda.get_device_capability()
-        if device_cap in ((7, 0), (8, 0), (9, 0)):
-            gpu_ok = True
-
-    if not gpu_ok:
-        warnings.warn(
-            "GPU is not NVIDIA V100, A100, or H100. Speedup numbers may be lower "
-            "than expected."
-        )
-    else:
-        print("GPU should support model compilation with torch.compile()!")
-
-
 if __name__ == '__main__':
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    torch_compile_check()
-
+    print("USING DEVICE: ", device)
     config_dict = get_config()
     n_epochs = config_dict["training"]["n_epochs"]
 
@@ -75,6 +58,7 @@ if __name__ == '__main__':
 
     checkpoint_folder = config_dict["training"]["checkpoint_folder"]
     checkpoint_file = config_dict["training"]["checkpoint_file"]
+    warmup_steps = config_dict["training"]["warmup_steps"]
     os.makedirs(checkpoint_folder, exist_ok=True)
     train_loss_list_path = os.path.join(checkpoint_folder, "train_loss_list.txt")
     val_loss_list_path = os.path.join(checkpoint_folder, "val_loss_list.txt")
@@ -109,20 +93,19 @@ if __name__ == '__main__':
         best_val_loss = + np.inf
         best_train_loss = + np.inf
 
-    # transformer = torch.compile(transformer) # Buggy OMP: Error #15: Initializing libomp.dylib, but found libiomp5.dylib already initialized.  # noqa
-
     train_iter, val_iter, test_iter = data_source.get_data()
-
+    train_info = data_source.get_training_info()
+    val_info = data_source.get_validation_info()
     # From section 5.4: "During training, we employed label smoothing of value ε=0.1 .
     # This hurts perplexity, as the model learns to be more unsure, but improves accuracy and BLEU score."
     loss_fn = torch.nn.CrossEntropyLoss(
-        weight=data_source.get_training_weights().to(device),
+        weight=train_info["weights"].to(device),
         ignore_index=data_source.get_decoder_pad_token(),
         label_smoothing=0.1
     )
 
     loss_fn_val = torch.nn.CrossEntropyLoss(
-        weight=data_source.get_validation_weights().to(device),
+        weight=val_info["weights"].to(device),
         ignore_index=data_source.get_decoder_pad_token()
     )
     # Note that in PyTorch CrossEntropyLoss already computed softmax, this is why we didn't include it in our
@@ -130,19 +113,21 @@ if __name__ == '__main__':
     # From section 5.3: "We used the Adam optimizer [20] with β1 = 0.9, β2 = 0.98 and ε = 10−9."
     optimizer = torch.optim.Adam(transformer.parameters(), lr=1, betas=(0.9, 0.98),
                                  eps=1e-9)  # fixme: is lr=1 as a starting point correct?  # noqa
+
+    # fixme: why training loss and validation loss are that different during thre training prvess? e. g 21 vs 7
     if checkpoint_file is not None:
         optimizer.load_state_dict(optimizer_state_dict)
 
     lr_scheduler = LambdaLR(
         optimizer=optimizer,
-        lr_lambda=lambda step: get_current_lr(d_model=transformer.embedding_dimension, step_num=step, warmup_steps=4000)
+        lr_lambda=lambda step: get_current_lr(
+            d_model=transformer.embedding_dimension, step_num=step, warmup_steps=warmup_steps
+        )
     )
     # IMPORTANT: Note that the way we schedule the learning rate here is fundamental to assure
     # that the model learns properly. We increase the learning rate linearly for 4000 epochs, and then we decrease it
     # exponentially.
 
-    train_loss_list = []
-    val_loss_list = []
     mean_train_loss = 0.0
     mean_val_loss = 0.0
 
@@ -187,7 +172,8 @@ if __name__ == '__main__':
                 loss.backward()
                 optimizer.step()
                 lr_scheduler.step()
-                train_loss_list.append(loss.item())
+                # todo: update step counter on pbar
+                mean_train_loss = loss.item() * target_batch.size(0)
 
             # ==== Start Validation Loop ====
 
@@ -215,11 +201,11 @@ if __name__ == '__main__':
                     )
                     val_loss = loss_fn_val(out.view(-1, data_source.get_decoder_vocab_size()),
                                            target=target_batch.view(-1))
-                    val_loss_list.append(val_loss.item())
+                    mean_val_loss = val_loss.item() * target_batch.size(0)
 
             # Compute mean losses and serialize
-            mean_train_loss = np.mean(train_loss_list)
-            mean_val_loss = np.mean(val_loss_list)
+            mean_train_loss = mean_train_loss/train_info["n_samples"]
+            mean_val_loss = mean_val_loss/val_info["n_samples"]
 
             if mean_train_loss < best_train_loss:
                 best_train_loss = mean_train_loss
@@ -242,7 +228,7 @@ if __name__ == '__main__':
                 f.write(f"{str(epoch_index).zfill(4)}: {mean_val_loss}\n")
 
             if mean_val_loss < best_val_loss:
-                print(f"[NEW BEST MODEL!]")
+                print(f" <<[NEW BEST MODEL]>>")
                 best_val_loss = mean_val_loss
                 checkpoint_path = os.path.join(checkpoint_folder, f"val_checkpoint.pt")
                 torch.save(
@@ -256,11 +242,11 @@ if __name__ == '__main__':
                     },
                     checkpoint_path
                 )
-            train_loss_list = []
-            val_loss_list = []
-            pbar.update(1)
             base_desc = "|| Train Loss: {:.4f} || Val Loss: {:.4f} || BEST Train Loss: {:.4f} || BEST Val Loss: {:.4f}".\
                 format(
                     mean_train_loss, mean_val_loss, best_train_loss, best_val_loss
                 )
             pbar.set_description(base_desc)
+            pbar.update(1)
+            mean_train_loss = 0.0
+            mean_val_loss = 0.0

@@ -5,7 +5,6 @@ from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import vocab
 from collections import Counter, OrderedDict
 from torchtext.utils import extract_archive
-import numpy as np
 from tqdm import tqdm
 import io
 
@@ -179,7 +178,7 @@ class German2EnglishDataFactory:
                                shuffle=False, collate_fn=self.generate_batch)
         return train_iter, valid_iter, test_iter
 
-    def _get_weights(self, data_loader: DataLoader, description: str = ""):
+    def _get_info(self, data_loader: DataLoader, description: str = ""):
         counter = Counter()
         for batch_dict in tqdm(data_loader, desc=description):
             target_batch = batch_dict["target"]
@@ -194,14 +193,14 @@ class German2EnglishDataFactory:
             if c in counter.keys():
                 weights[c] = total_number_of_samples / (counter[c] * len(counter.keys()))\
                     if c != self.get_decoder_pad_token() else 0.0
-        return weights
+        return {"weights": weights, "n_samples": total_number_of_samples}
 
-    def get_training_weights(self):
+    def get_training_info(self):
         train_iter = DataLoader(self.train_data, batch_size=1,
                                 shuffle=True, collate_fn=self.generate_batch)
-        return self._get_weights(train_iter, "Computing training target weights...")
+        return self._get_info(train_iter, "Retrieving training weights and total number of samples...")
 
-    def get_validation_weights(self):
+    def get_validation_info(self):
         train_iter = DataLoader(self.val_data, batch_size=1,
                                 shuffle=True, collate_fn=self.generate_batch)
-        return self._get_weights(train_iter, "Computing validation target weights...")
+        return self._get_info(train_iter, "Retrieving training weights and total number of samples...")

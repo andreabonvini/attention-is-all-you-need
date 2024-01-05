@@ -4,6 +4,7 @@
     },
     "training": {
         "n_epochs": 100000,
+        "warmup_steps": 4000,
         "checkpoint_folder": "checkpoint_original_model_base",
         "checkpoint_file": null
     },
