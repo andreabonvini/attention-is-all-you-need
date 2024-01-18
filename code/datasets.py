@@ -170,12 +170,13 @@ class German2EnglishDataFactory:
         }
 
     def get_data(self):
+        # TODO: CHANGE shuffle==False, or investigate further about it.
         train_iter = DataLoader(self.train_data, batch_size=self.batch_size,
-                                shuffle=False, collate_fn=self.generate_batch)
+                                shuffle=True, collate_fn=self.generate_batch)
         valid_iter = DataLoader(self.val_data, batch_size=self.batch_size,
-                                shuffle=False, collate_fn=self.generate_batch)
+                                shuffle=True, collate_fn=self.generate_batch)
         test_iter = DataLoader(self.test_data, batch_size=self.batch_size,
-                               shuffle=False, collate_fn=self.generate_batch)
+                               shuffle=True, collate_fn=self.generate_batch)
         return train_iter, valid_iter, test_iter
 
     def _get_info(self, data_loader: DataLoader, description: str = ""):
@@ -201,6 +202,6 @@ class German2EnglishDataFactory:
         return self._get_info(train_iter, "Retrieving training weights and total number of samples...")
 
     def get_validation_info(self):
-        train_iter = DataLoader(self.val_data, batch_size=1,
+        val_iter = DataLoader(self.val_data, batch_size=1,
                                 shuffle=True, collate_fn=self.generate_batch)
-        return self._get_info(train_iter, "Retrieving training weights and total number of samples...")
+        return self._get_info(val_iter, "Retrieving validation weights and total number of samples...")

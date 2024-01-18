@@ -8,7 +8,7 @@ from typing import Optional
 
 class EmbeddingBlock(nn.Module):
     def __init__(self, dictionary_size: int, embedding_dim: int):
-        super(EmbeddingBlock, self).__init__()
+        super().__init__()
         self.embedding_dim = embedding_dim
         self.embedding_lookup_table = nn.Embedding(
             num_embeddings=dictionary_size,
@@ -22,7 +22,7 @@ class EmbeddingBlock(nn.Module):
 
 class PositionalEncoding(nn.Module):
     def __init__(self, embedding_dim: int, max_tokens: int, scalar: int = 1e4, dropout_probability: float = 0.0):
-        super(PositionalEncoding, self).__init__()
+        super().__init__()
         token_positions = torch.arange(0, max_tokens).unsqueeze(1)
         even_embedding_positions = torch.arange(0, embedding_dim, 2)
         # We encapsulate self.positional_encoding to nn.Parameter() so when moving a Transformer
@@ -45,7 +45,7 @@ class PositionalEncoding(nn.Module):
 
 class ScaledDotProductAttention(nn.Module):
     def __init__(self):
-        super(ScaledDotProductAttention, self).__init__()
+        super().__init__()
 
     def forward(self, Q, K, V, mask: Optional[torch.Tensor] = None):  # noqa
         # Q, K, V size: (num_batches, num_tokens, dim)
@@ -124,7 +124,7 @@ class TransformerEncoderBlock(nn.Module):
             feedforward_dimension: int,
             dropout_probability: float = 0.0,
     ):
-        super(TransformerEncoderBlock, self).__init__()
+        super().__init__()
 
         self.multi_head_self_attention = MultiHeadAttention(
             number_of_attention_heads=n_attention_heads,
@@ -160,7 +160,7 @@ class TransformerDecoderBlock(nn.Module):
             feedforward_dimension: int,
             dropout_probability: float = 0.0,
     ):
-        super(TransformerDecoderBlock, self).__init__()
+        super().__init__()
 
         self.masked_multi_head_self_attention = MultiHeadAttention(
             number_of_attention_heads=n_attention_heads,
@@ -218,7 +218,7 @@ class Transformer(nn.Module):
             feedforward_dimension: int,
             dropout_probability: float = 0.0
     ):
-        super(Transformer, self).__init__()
+        super().__init__()
 
         self.encoder_embedding_block = EmbeddingBlock(encoder_vocabulary_dimension, embedding_dimension)
         self.positional_encoding_block = PositionalEncoding(
@@ -322,7 +322,8 @@ class Transformer(nn.Module):
             decoder_tokens = decoder_pad_function(decoder_tokens)
             n_tokens_decoder = decoder_tokens.size(1)
             n_tokens_encoder = encoder_tokens.size(1)
-            decoder_self_attention_mask = torch.ones(n_tokens_decoder, n_tokens_decoder).bool() & (
+            # todo: We create a causal mask at inference time too?
+            decoder_self_attention_mask = torch.tril(torch.ones(n_tokens_decoder, n_tokens_decoder)).bool() & (
                         decoder_tokens != decoder_vocab['<pad>']).unsqueeze(0)  # add batch dimension
             decoder_cross_attention_mask = torch.ones(n_tokens_decoder, n_tokens_encoder).bool() & (
                         encoder_tokens != encoder_vocab['<pad>']).unsqueeze(0)  # add batch dimension
@@ -335,8 +336,7 @@ class Transformer(nn.Module):
             last_decoder_output_token = torch.argmax(output[0][current_decoder_output_length])
             current_decoder_output_length += 1
             str_tokens = [decoder_i2s[torch.argmax(logits)] for logits in output[0]]
-            str_tokens = [t if t != '\n' else '\\n' for t in str_tokens]
-        return " ".join(str_tokens)  # noqa
+        return " ".join([decoder_i2s[tok.item()] for tok in decoder_tokens[0, : current_decoder_output_length] ]) + "\n[" + " ".join(str_tokens) +']'  # noqa
 
 
 # ============== PyTorch Transformer Wrapper =============
@@ -352,7 +352,7 @@ class PyTorchTransformer(nn.Module):
             feedforward_dimension: int,
             dropout_probability: float = 0.0
     ):
-        super(PyTorchTransformer, self).__init__()
+        super().__init__()
 
         self.number_of_attention_heads = number_of_attention_heads
 
