@@ -49,6 +49,17 @@ if __name__ == "__main__":
     checkpoint_path = get_checkpoint_path()
 
     ckp = torch.load(checkpoint_path, map_location="cpu")
+
+    train_loss_list = ckp["mean_train_loss_list"]
+    val_loss_list = ckp["mean_val_loss_list"]
+    import matplotlib.pyplot as plt
+
+    plt.plot(train_loss_list, label="Training loss")
+    plt.plot(val_loss_list, label="Validation Loss")
+    plt.xlabel("Epochs")
+    plt.legend()
+    plt.show()
+
     use_pytorch_transformer_class = ckp["use_pytorch_transformer_class"]
     if use_pytorch_transformer_class:
         transformer_model = PyTorchTransformer(**ckp["transformer_args"])

@@ -135,6 +135,8 @@ class TransformerEncoderBlock(nn.Module):
         self.feedforward = nn.Sequential(
             nn.Linear(embedding_dimension, feedforward_dimension),
             nn.ReLU(),
+            # In PyTorch implementation they put a Dropout() here too,
+            nn.Dropout(p=dropout_probability),  # TODO: NOT PRESENT IN OFFICIAL PAPER THOUGH
             nn.Linear(feedforward_dimension, embedding_dimension)
         )
         self.dropout_2 = nn.Dropout(p=dropout_probability)
@@ -180,6 +182,7 @@ class TransformerDecoderBlock(nn.Module):
             nn.Linear(embedding_dimension, feedforward_dimension),
             nn.ReLU(),
             # In PyTorch implementation they put a Dropout() here too,
+            nn.Dropout(p=dropout_probability),  # TODO: NOT PRESENT IN OFFICIAL PAPER THOUGH
             nn.Linear(feedforward_dimension, embedding_dimension)
         )
         self.dropout_3 = nn.Dropout(p=dropout_probability)
